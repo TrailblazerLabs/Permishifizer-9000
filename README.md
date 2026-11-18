@@ -592,16 +592,16 @@ The script executes four sequential phases against the target org's APIs:
 ┌──────────────────────────────────────────────────────────────────────┐
 │ Step 1 — PicklistValueInfo (REST API)                                │
 │ Fetches all permissionable object names from the ObjectPermissions   │
-│ SobjectType picklist. Uses ordered keyset pagination (`ORDER BY` +   │
-│ `Value > lastValue`) in pages of 2,000 rows. Merges in any names     │
-│ from `OBJECT_PERMISSION_SUPPLEMENTAL_OBJECTS` that Salesforce omits  │
-│ from the picklist (e.g. Task, Event).                                │
+│ SobjectType picklist, one case-insensitive name prefix at a time     │
+│ (`LIKE 'a%'`, ...), splitting any prefix that returns 2,000 rows.    │
+│ Merges in names from `OBJECT_PERMISSION_SUPPLEMENTAL_OBJECTS` that   │
+│ Salesforce omits from the picklist (e.g. Task, Event).               │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Step 2 — EntityDefinition (Tooling API)                              │
-│ Fetches all non-deprecated object names and FLS status via ordered   │
-│ keyset paging (`QualifiedApiName > lastValue`), excludes event,      │
-│ predefined, and non-FLS objects, and cross-references Step 1 to keep │
-│ only concrete objects in scope for objectPermissions.                │
+│ Fetches all non-deprecated object names and FLS status using the     │
+│ same prefix partitioning, excludes event, predefined, and non-FLS    │
+│ objects, and cross-references Step 1 to keep only concrete objects   │
+│ in scope for objectPermissions.                                      │
 ├──────────────────────────────────────────────────────────────────────┤
 │ Step 3 — EntityParticle (Tooling API)                                │
 │ Queries all permissionable fields in batches of 50 objects.          │
@@ -624,7 +624,7 @@ The script executes four sequential phases against the target org's APIs:
 ### Key Design Decisions
 
 - **Full regeneration** — The XML file is always written from scratch, not patched, ensuring the output always reflects the current org state.
-- **Keyset pagination** — Large object surfaces are fetched with deterministic, ordered pagination (`ORDER BY` + `> lastValue`) in `QUERY_PAGE_SIZE` chunks, reducing query count and complexity.
+- **Prefix-partitioned queries** — EntityDefinition and PicklistValueInfo reject `queryMore()`, and keyset paging (`ORDER BY` + `> lastValue`) silently skips rows because `ORDER BY` is case-insensitive while `>` is case-sensitive. Instead, the script queries one case-insensitive `LIKE` name prefix at a time and splits any prefix that fills a `QUERY_PAGE_SIZE` page into longer prefixes.
 - **Permissionable-first field access** — Any field returned as `IsPermissionable=true` is emitted with `readable=true` and `editable=true` to maximize backup/restore coverage, including formula and other non-writable field types.
 - **Compound compatibility guard** — `EntityParticle.IsComponent=true` fields are excluded so generated `fieldPermissions` only contain valid field names Salesforce accepts during deployment.
 - **PersonAccount normalization** — `Account.PersonAccount` record types are normalized to `PersonAccount.PersonAccount` as required by permission set XML format.
@@ -663,7 +663,7 @@ These constants can be modified at the top of `permishifizer9000.py`:
 | `FIELD_PERMISSION_SUPPLEMENTAL_FIELDS` | `{"DisputeItemChargeBack.CardBrand"}` | Fully-qualified field API names (`Object.Field`) injected verbatim into `fieldPermissions`; use for fields valid in permission sets but absent from both EntityParticle and FieldDefinition |
 | `USER_PERMISSION_NAMES`      | *(see source)*                    | Set of user permission API names emitted as `userPermissions` entries |
 | `BATCH_SIZE`                 | `50`                              | Number of objects per EntityParticle query batch                |
-| `QUERY_PAGE_SIZE`            | `2000`                            | Page size for PicklistValueInfo and EntityDefinition keyset pagination |
+| `QUERY_PAGE_SIZE`            | `2000`                            | Row limit per PicklistValueInfo and EntityDefinition prefix query; a prefix that reaches it is split into longer prefixes |
 | `HTTP_TIMEOUT_SECONDS`       | `90`                              | Timeout for each HTTP request to Salesforce                    |
 | `SF_COMMAND_TIMEOUT_SECONDS` | `120`                             | Timeout for Salesforce CLI subprocess calls                    |
 | `DEPLOY_TIMEOUT_BUFFER_SECONDS` | `300`                          | Extra seconds added to `deploy_wait × 60` for the deploy subprocess timeout |

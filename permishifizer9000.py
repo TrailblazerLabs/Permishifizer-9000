@@ -754,84 +754,66 @@ def connected_org_display(result, target_org):
     return "default org"
 
 
-def picklist_where(last_value=None):
-    where = (
-        "EntityParticle.EntityDefinition.QualifiedApiName = 'ObjectPermissions' "
-        "AND EntityParticle.QualifiedApiName = 'SobjectType' "
-        "AND IsActive = TRUE"
-    )
-    if last_value:
-        where += f" AND Value > '{last_value}'"
-    return where
+LIKE_PREFIX_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789_"
 
 
-def picklist_fetch_batch(org, last_value=None):
-    soql = (
-        "SELECT Value FROM PicklistValueInfo "
-        f"WHERE {picklist_where(last_value)} "
-        "ORDER BY Value "
-        f"LIMIT {QUERY_PAGE_SIZE}"
-    )
-    recs = rest_query(soql, org)
-    return [r.get("Value", "") for r in recs if r.get("Value")]
+def fetch_by_name_prefix(query_fn, build_soql, name_field, org, prefix=""):
+    """Fetch all records keyed by name, splitting into case-insensitive LIKE prefixes.
+
+    EntityDefinition and PicklistValueInfo reject queryMore, and keyset paging
+    skips rows because ORDER BY is case-insensitive while '>' is case-sensitive.
+    """
+    records = {}
+    # API names always start with a letter.
+    chars = LIKE_PREFIX_CHARS if prefix else LIKE_PREFIX_CHARS[:26]
+    for ch in chars:
+        sub_prefix = prefix + ch
+        pattern = sub_prefix.replace("_", "\\_") + "%"
+        batch = query_fn(build_soql(pattern), org)
+        if len(batch) < QUERY_PAGE_SIZE:
+            for rec in batch:
+                name = rec.get(name_field)
+                if name:
+                    records[name] = rec
+            continue
+        # Partition is full: an exact match on the prefix itself sorts first and
+        # would not be matched by any longer sub-prefix.
+        for rec in batch:
+            name = rec.get(name_field) or ""
+            if name.lower() == sub_prefix:
+                records[name] = rec
+        records.update(fetch_by_name_prefix(query_fn, build_soql, name_field, org, sub_prefix))
+    return records
 
 
 def fetch_picklist_object_names(org):
-    names = []
-    last_value = None
+    def build_soql(pattern):
+        return (
+            "SELECT Value FROM PicklistValueInfo "
+            "WHERE EntityParticle.EntityDefinition.QualifiedApiName = 'ObjectPermissions' "
+            "AND EntityParticle.QualifiedApiName = 'SobjectType' "
+            "AND IsActive = TRUE "
+            f"AND Value LIKE '{pattern}' "
+            "ORDER BY Value "
+            f"LIMIT {QUERY_PAGE_SIZE}"
+        )
 
-    while True:
-        batch = picklist_fetch_batch(org, last_value)
-        if not batch:
-            break
-
-        names.extend(batch)
-        if len(batch) < QUERY_PAGE_SIZE:
-            break
-
-        last_value = batch[-1]
-
-    return names
-
-
-def entitydef_where(last_value=None):
-    where = "IsDeprecatedAndHidden = FALSE"
-    if last_value:
-        where += f" AND QualifiedApiName > '{last_value}'"
-    return where
-
-
-def entitydef_fetch_batch(org, last_value=None):
-    soql = (
-        "SELECT QualifiedApiName, IsFlsEnabled FROM EntityDefinition "
-        f"WHERE {entitydef_where(last_value)} "
-        "ORDER BY QualifiedApiName "
-        f"LIMIT {QUERY_PAGE_SIZE}"
-    )
-    recs = tooling_query(soql, org)
-    return [
-        (r.get("QualifiedApiName", ""), bool(r.get("IsFlsEnabled")))
-        for r in recs if r.get("QualifiedApiName")
-    ]
+    return list(fetch_by_name_prefix(rest_query, build_soql, "Value", org))
 
 
 def fetch_entity_definition_objects(org):
     """Return a list of (QualifiedApiName, IsFlsEnabled) tuples."""
-    results = []
-    last_value = None
+    def build_soql(pattern):
+        return (
+            "SELECT QualifiedApiName, IsFlsEnabled FROM EntityDefinition "
+            "WHERE IsDeprecatedAndHidden = FALSE "
+            f"AND QualifiedApiName LIKE '{pattern}' "
+            "ORDER BY QualifiedApiName "
+            f"LIMIT {QUERY_PAGE_SIZE}"
+        )
 
-    while True:
-        batch = entitydef_fetch_batch(org, last_value)
-        if not batch:
-            break
-
-        results.extend(batch)
-        if len(batch) < QUERY_PAGE_SIZE:
-            break
-
-        last_value = batch[-1][0]  # QualifiedApiName of the last tuple
-
-    return results
+    records = fetch_by_name_prefix(tooling_query, build_soql, "QualifiedApiName", org)
+    return [(name, bool(rec.get("IsFlsEnabled"))) for name, rec in records.items()]
 
 
 def sort_key(elem):
